@@ -40,7 +40,6 @@ struct app_ctx {
     const struct aws_string *aws_access_key_id;
     const struct aws_string *aws_secret_access_key;
     const struct aws_string *aws_session_token;
-
     const struct aws_string *ciphertext_b64;
 };
 
@@ -75,7 +74,7 @@ static void s_parse_options(int argc, char **argv, struct app_ctx *ctx) {
     ctx->aws_secret_access_key = NULL;
     ctx->aws_session_token = NULL;
     ctx->ciphertext_b64 = NULL;
-
+    
     while (true) {
         int option_index = 0;
         int c = aws_cli_getopt_long(argc, argv, "r:x:k:s:t:c:h", s_long_options, &option_index);
@@ -145,7 +144,7 @@ static void s_parse_options(int argc, char **argv, struct app_ctx *ctx) {
     }
 }
 
-static void decrypt(struct app_ctx *app_ctx, struct aws_byte_buf *ciphertext_decrypted_b64) {
+static void decrypt(struct app_ctx *app_ctx, struct aws_byte_buf *ciphertext_decrypted_b64,struct aws_byte_buf *plaintext_encrypted_b64) {
     ssize_t rc = 0;
 
     struct aws_credentials *credentials = NULL;
@@ -182,13 +181,14 @@ static void decrypt(struct app_ctx *app_ctx, struct aws_byte_buf *ciphertext_dec
     /* Get decode base64 string into bytes. */
     size_t ciphertext_len;
     struct aws_byte_buf ciphertext;
-    struct aws_byte_cursor ciphertext_b64 = aws_byte_cursor_from_c_str((const char*) app_ctx->ciphertext_b64->bytes);
+    &ciphertext=plaintext_encrypted_b64;
+    // struct aws_byte_cursor ciphertext_b64 = aws_byte_cursor_from_c_str((const char*) app_ctx->ciphertext_b64->bytes);
 
-    rc = aws_base64_compute_decoded_len(&ciphertext_b64, &ciphertext_len);
-    fail_on(rc != AWS_OP_SUCCESS);
-    rc = aws_byte_buf_init(&ciphertext, app_ctx->allocator, ciphertext_len);
-    fail_on(rc != AWS_OP_SUCCESS);
-    rc = aws_base64_decode(&ciphertext_b64, &ciphertext);
+    // rc = aws_base64_compute_decoded_len(&ciphertext_b64, &ciphertext_len);
+    // fail_on(rc != AWS_OP_SUCCESS);
+    // rc = aws_byte_buf_init(&ciphertext, app_ctx->allocator, ciphertext_len);
+    // fail_on(rc != AWS_OP_SUCCESS);
+    // rc = aws_base64_decode(&ciphertext_b64, &ciphertext);
     fail_on(rc != AWS_OP_SUCCESS);
 
     /* Decrypt the data with KMS. */
@@ -212,10 +212,78 @@ static void decrypt(struct app_ctx *app_ctx, struct aws_byte_buf *ciphertext_dec
     return;
 }
 
+//encrypt design
+static void encrypt(struct app_ctx *app_ctx, struct aws_byte_buf *plaintext_encrypted_b64) {
+    ssize_t rc = 0;
+    const struct aws_string *key_id;
+    struct aws_credentials *credentials = NULL;
+    struct aws_nitro_enclaves_kms_client *client = NULL;
+
+    /* Parent is always on CID 3 */
+    struct aws_socket_endpoint endpoint = {.address = DEFAULT_PARENT_CID, .port = app_ctx->proxy_port};
+    struct aws_nitro_enclaves_kms_client_configuration configuration = {
+        .allocator = app_ctx->allocator,
+        .endpoint = &endpoint,
+        .domain = AWS_SOCKET_VSOCK,
+        .region = app_ctx->region
+    };
+
+    /* Sets the AWS credentials and creates a KMS client with them. */
+    struct aws_credentials *new_credentials = aws_credentials_new(
+        app_ctx->allocator,
+        aws_byte_cursor_from_c_str((const char*) app_ctx->aws_access_key_id->bytes),
+        aws_byte_cursor_from_c_str((const char*) app_ctx->aws_secret_access_key->bytes),
+        aws_byte_cursor_from_c_str((const char*) app_ctx->aws_session_token->bytes),
+        UINT64_MAX);
+
+    /* If credentials or client already exists, replace them. */
+    if (credentials != NULL) {
+        aws_nitro_enclaves_kms_client_destroy(client);
+        aws_credentials_release(credentials);
+    }
+
+    credentials = new_credentials;
+    configuration.credentials = new_credentials;
+    client = aws_nitro_enclaves_kms_client_new(&configuration);
+    
+    /* Decrypt uses KMS to decrypt the ciphertext */
+    /* Get decode base64 string into bytes. */
+    size_t plaintext_len;
+    struct aws_byte_buf plaintext;
+    struct aws_byte_cursor plaintext_b64 = aws_byte_cursor_from_c_str((const char*) app_ctx->ciphertext_b64->bytes);
+
+    rc = aws_base64_compute_decoded_len(&plaintext_b64, &plaintext_len);
+    fail_on(rc != AWS_OP_SUCCESS);
+    rc = aws_byte_buf_init(&plaintext, app_ctx->allocator, plaintext_len);
+    fail_on(rc != AWS_OP_SUCCESS);
+    rc = aws_base64_decode(&plaintext_b64, &plaintext);
+    fail_on(rc != AWS_OP_SUCCESS);
+
+    /* Decrypt the data with KMS. */
+    struct aws_byte_buf plaintext_encrypted;
+    rc = aws_kms_encrypt_blocking(client,&key_id,&plaintext, &plaintext_encrypted);
+    aws_byte_buf_clean_up(&plaintext);
+    fail_on(rc != AWS_OP_SUCCESS);
+
+    /* Encode ciphertext into base64 for printing out the result. */
+    size_t plaintext_encrypted_b64_len;
+    struct aws_byte_cursor plaintext_encrypted_cursor = aws_byte_cursor_from_buf(&plaintext_encrypted);
+    aws_base64_compute_encoded_len(plaintext_encrypted.len, &plaintext_encrypted_b64_len);
+    rc = aws_byte_buf_init(plaintext_encrypted_b64, app_ctx->allocator, plaintext_encrypted_b64_len + 1);
+    fail_on(rc != AWS_OP_SUCCESS);
+    rc = aws_base64_encode(&plaintext_encrypted_cursor, plaintext_encrypted_b64);
+    fail_on(rc != AWS_OP_SUCCESS);
+    aws_byte_buf_append_null_terminator(plaintext_encrypted_b64);
+
+    aws_nitro_enclaves_kms_client_destroy(client);
+    aws_credentials_release(credentials);
+    return;
+}
+
 int main(int argc, char **argv) {
     struct app_ctx app_ctx;
     struct aws_byte_buf ciphertext_decrypted_b64;
-
+    struct aws_byte_buf plaintext_encrypted_b64;
     /* Initialize the SDK */
     aws_nitro_enclaves_library_init(NULL);
 
@@ -236,12 +304,17 @@ int main(int argc, char **argv) {
     aws_logger_init_standard(&err_logger, app_ctx.allocator, &options);
     aws_logger_set(&err_logger);
 
-    decrypt(&app_ctx, &ciphertext_decrypted_b64);
+    encrypt(&app_ctx,&plaintext_encrypted_b64);
+
+    decrypt(&app_ctx, &ciphertext_decrypted_b64,&plaintext_encrypted_b64);
+    
 
     /* Print the base64-encoded plaintext to stdout */
+    fprintf(stdout, "%s", (const char *) plaintext_encrypted_b64.buffer);
     fprintf(stdout, "%s", (const char *) ciphertext_decrypted_b64.buffer);
 
     aws_byte_buf_clean_up(&ciphertext_decrypted_b64);
+    aws_byte_buf_clean_up(&plaintext_encrypted_b64);
     aws_nitro_enclaves_library_clean_up();
     aws_global_thread_creator_shutdown_wait_for(10);
 
