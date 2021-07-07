@@ -40,8 +40,10 @@ struct app_ctx {
     struct aws_allocator *allocator;
     const struct aws_string *message;
     const struct aws_string *region;
+    const struct aws_string *key;
     uint32_t port;
     uint32_t cid;
+    
     socket_t peer_fd;
 
     char peer_buffer[BUF_SIZE];
@@ -75,6 +77,7 @@ static struct aws_cli_option s_long_options[] = {
     {"port", AWS_CLI_OPTIONS_REQUIRED_ARGUMENT, NULL, 'p'},
     {"cid", AWS_CLI_OPTIONS_REQUIRED_ARGUMENT, NULL, 'c'},
     {"region", AWS_CLI_OPTIONS_REQUIRED_ARGUMENT, NULL, 'r'},
+    {"key", AWS_CLI_OPTIONS_REQUIRED_ARGUMENT, NULL, 'k'},
     {"help", AWS_CLI_OPTIONS_NO_ARGUMENT, NULL, 'h'},
     {NULL, 0, NULL, 0},
 };
@@ -85,7 +88,7 @@ static void s_parse_options(int argc, char **argv, struct app_ctx *ctx) {
 
     while (true) {
         int option_index = 0;
-        int c = aws_cli_getopt_long(argc, argv, "p:c:r:h", s_long_options, &option_index);
+        int c = aws_cli_getopt_long(argc, argv, "p:c:r:h:k", s_long_options, &option_index);
         if (c == -1) {
             break;
         }
@@ -102,6 +105,8 @@ static void s_parse_options(int argc, char **argv, struct app_ctx *ctx) {
             case 'r':
                 ctx->region = aws_string_new_from_c_str(ctx->allocator, aws_cli_optarg);
                 break;
+            case 'k':
+                ctx->key=atoi(aws_cli_optarg);
             case 'h':
                 s_usage(0);
                 break;
@@ -430,7 +435,13 @@ end:
         exit(1);
     }
 }
-
+int s_send_encrypt_command(struct app_ctx *app_ctx) {
+    //const struct aws_string plaintext='1234';
+    struct json_object *encrypt = json_object_new_object();
+    json_object_object_add(encrypt, "Operation", json_object_new_string("Encrypt"));
+    json_object_object_add(encrypt, "Plaintext", json_object_new_string("12345");
+    return s_write_object(app_ctx->peer_fd, encrypt);
+}
 int s_send_decrypt_command(struct app_ctx *app_ctx) {
     struct json_object *decrypt = json_object_new_object();
     json_object_object_add(decrypt, "Operation", json_object_new_string("Decrypt"));
@@ -503,7 +514,15 @@ int main(int argc, char **argv) {
         exit(1);
     }
     s_handle_status(&app_ctx);
-
+    rc = s_send_encrypt_command(&app_ctx);
+    if (rc != AWS_OP_SUCCESS) {
+        fprintf(stderr, "Could not encrypt command\n");
+        s_close_socket(app_ctx.peer_fd);
+        aws_credentials_release(app_ctx.credentials);
+        s_socket_cleanup();
+        exit(1);
+    }
+    s_handle_status(&app_ctx);
     rc = s_send_decrypt_command(&app_ctx);
     if (rc != AWS_OP_SUCCESS) {
         fprintf(stderr, "Could not send decrypt command\n");
